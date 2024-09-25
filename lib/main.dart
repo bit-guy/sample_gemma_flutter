@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'gemma_stream.dart';
+import 'dart:async';
+import 'gemma.dart';
 
 void main() {
   runApp(MyApp());
@@ -9,7 +10,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Gemma Chat',
+      title: 'Gemma Chat App',
       theme: ThemeData(
         primarySwatch: Colors.blue,
       ),
@@ -25,21 +26,112 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
+  late GemmaModel _model;
   final TextEditingController _textController = TextEditingController();
-  bool _isComposing = false;
+  final ScrollController _scrollController = ScrollController();
+  var _tokenStreamController = StreamController<String>();
+  bool _isGenerating = false;
+  String _currentResponse = '';
+  String _selectedModel = list.first;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeModel();
+    _tokenStreamController.stream.listen((token) {
+      setState(() {
+        _currentResponse += token;
+        _messages.last.text = _currentResponse;
+      });
+      _scrollToBottom();
+    });
+  }
+
+  void _initializeModel() {
+    _model = GemmaModel(_selectedModel);
+  }
+
+  @override
+  void dispose() {
+    _model.cleanupModel();
+    _model.dispose();
+    _textController.dispose();
+    _tokenStreamController.close();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _handleModelChange(String? newModel) {
+    if (newModel != null && newModel != _selectedModel) {
+      setState(() {
+        _selectedModel = newModel;
+        _model.cleanupModel();
+        _model.dispose();
+        _initializeModel();
+      });
+    }
+  }
+
+  void _handleSubmitted(String text) {
+    _textController.clear();
+    ChatMessage message = ChatMessage(
+      text: text,
+      isUser: true,
+      model: _selectedModel,
+    );
+    setState(() {
+      _messages.add(message);
+      _isGenerating = true;
+    });
+    _currentResponse = '';
+    _messages.add(ChatMessage(text: '', isUser: false, model: _selectedModel));
+    _generateResponse(text);
+  }
+
+  Future<void> _generateResponse(String prompt) async {
+    try {
+      await _model.generateResponseAsync(prompt, (token) {
+        _tokenStreamController.add(token);
+      });
+    } catch (e) {
+      print("Error generating response: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
+    } finally {
+      setState(() {
+        _isGenerating = false;
+      });
+    }
+  }
+
+  void _scrollToBottom() {
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Gemma Chat')),
+      appBar: AppBar(
+        shape: const Border(bottom: BorderSide(color: Colors.grey, width: 0.2)),
+        title: Center(
+          child: PlaygroundTitle(
+            selectedModel: _selectedModel,
+            onModelChanged: _handleModelChange,
+          ),
+        ),
+      ),
       body: Column(
         children: [
-          Flexible(
+          Expanded(
             child: ListView.builder(
-              padding: EdgeInsets.all(8.0),
-              reverse: true,
-              itemBuilder: (_, int index) => _messages[index],
+              controller: _scrollController,
               itemCount: _messages.length,
+              itemBuilder: (context, index) => _messages[index],
             ),
           ),
           Divider(height: 1.0),
@@ -62,23 +154,19 @@ class _ChatScreenState extends State<ChatScreen> {
             Flexible(
               child: TextField(
                 controller: _textController,
-                onChanged: (String text) {
-                  setState(() {
-                    _isComposing = text.isNotEmpty;
-                  });
-                },
-                onSubmitted: _isComposing ? _handleSubmitted : null,
+                onSubmitted: _isGenerating ? null : _handleSubmitted,
                 decoration:
                     InputDecoration.collapsed(hintText: "Send a message"),
+                enabled: !_isGenerating,
               ),
             ),
             Container(
               margin: EdgeInsets.symmetric(horizontal: 4.0),
               child: IconButton(
                 icon: Icon(Icons.send),
-                onPressed: _isComposing
-                    ? () => _handleSubmitted(_textController.text)
-                    : null,
+                onPressed: _isGenerating
+                    ? null
+                    : () => _handleSubmitted(_textController.text),
               ),
             ),
           ],
@@ -86,66 +174,33 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
   }
-
-  void _handleSubmitted(String text) {
-    _textController.clear();
-    setState(() {
-      _isComposing = false;
-    });
-    ChatMessage message = ChatMessage(
-      text: text,
-      isUser: true,
-    );
-    setState(() {
-      _messages.insert(0, message);
-    });
-    _getGemmaResponse(text);
-  }
-
-  void _getGemmaResponse(String prompt) {
-    gemma(prompt).listen(
-      (token) {
-        setState(() {
-          if (_messages.isNotEmpty && !_messages.first.isUser) {
-            _messages.first.text += token;
-          } else {
-            _messages.insert(0, ChatMessage(text: token, isUser: false));
-          }
-        });
-      },
-      onDone: () {
-        // Optionally handle completion of the stream
-      },
-      onError: (error) {
-        print('Error: $error');
-        // Optionally handle errors
-      },
-    );
-  }
 }
 
 class ChatMessage extends StatelessWidget {
-  ChatMessage({required this.text, required this.isUser});
-
   String text;
   final bool isUser;
+  final String model;
+
+  ChatMessage({required this.text, required this.isUser, this.model = 'Gemma'});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: EdgeInsets.symmetric(vertical: 10.0),
+      margin: EdgeInsets.symmetric(vertical: 10.0, horizontal: 16.0),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
             margin: EdgeInsets.only(right: 16.0),
-            child: CircleAvatar(child: Text(isUser ? 'U' : 'G')),
+            child: CircleAvatar(
+              child: Text(isUser ? 'U' : 'G'),
+            ),
           ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(isUser ? 'User' : 'Gemma',
+                Text(isUser ? 'User' : model,
                     style: Theme.of(context).textTheme.titleMedium),
                 Container(
                   margin: EdgeInsets.only(top: 5.0),
@@ -155,6 +210,40 @@ class ChatMessage extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+const List<String> list = <String>[
+  'gemma-2b-sfp',
+  'recurrentgemma-2b-it-sfp-cpp',
+];
+
+class PlaygroundTitle extends StatelessWidget {
+  final String selectedModel;
+  final Function(String?) onModelChanged;
+
+  const PlaygroundTitle({
+    Key? key,
+    required this.selectedModel,
+    required this.onModelChanged,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonHideUnderline(
+      child: DropdownButton<String>(
+        alignment: Alignment.center,
+        value: selectedModel,
+        icon: const Icon(Icons.arrow_drop_down),
+        onChanged: onModelChanged,
+        items: list.map<DropdownMenuItem<String>>((String value) {
+          return DropdownMenuItem<String>(
+            value: value,
+            child: Center(child: Text(value)),
+          );
+        }).toList(),
       ),
     );
   }
